@@ -1,7 +1,9 @@
-.PHONY: build
+OTEL_RESOURCE_ATTRIBUTES="service.name=dice,service.version=0.1.0"
 
+
+.PHONY: build
 build:
-	sam build
+	sam build --no-cached
 
 
 .PHONY: run

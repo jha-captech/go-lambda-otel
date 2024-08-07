@@ -3,39 +3,33 @@ package telemetry
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
-	"time"
 
-	"go.opentelemetry.io/contrib/bridges/otelslog"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/exporters/stdout/stdoutlog"
-	"go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
-	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
-	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
-	"go.opentelemetry.io/otel/sdk/log"
-	sdkMetric "go.opentelemetry.io/otel/sdk/metric"
-	sdkTracer "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/trace"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktracer "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 )
 
 type Telemeter struct {
-	Meter  metric.Meter
 	Logger *slog.Logger
-	Tracer trace.Tracer
+	*sdkmetric.MeterProvider
+	*sdktracer.TracerProvider
+	propagation.TextMapPropagator
 }
 
-// SetupOTELSDK bootstraps the OpenTelemetry pipeline.
-// If it does not return an error, make sure to call shutdown for proper cleanup.
-func SetupOTELSDK(ctx context.Context, appName string) (telemetry *Telemeter, shutdown func(context.Context) error, err error) {
-	var shutdownFuncs []func(context.Context) error
+func NewTelemeter(ctx context.Context, appName string) (Telemeter, func(context.Context) error, error) {
+	var (
+		telemeter     Telemeter
+		shutdownFuncs []func(context.Context) error
+		err           error
+	)
 
-	telemetry = &Telemeter{}
-
-	// shutdown calls cleanup functions registered via shutdownFuncs.
-	// The errors from the calls are joined.
-	// Each registered cleanup will be invoked once.
-	shutdown = func(ctx context.Context) error {
+	shutdown := func(ctx context.Context) error {
 		var err error
 		for _, fn := range shutdownFuncs {
 			err = errors.Join(err, fn(ctx))
@@ -45,99 +39,53 @@ func SetupOTELSDK(ctx context.Context, appName string) (telemetry *Telemeter, sh
 		return err
 	}
 
-	// handleErr calls shutdown for cleanup and makes sure that all errors are returned.
 	handleErr := func(inErr error) {
 		err = errors.Join(inErr, shutdown(ctx))
 	}
 
-	// Set up propagator.
-	prop := newPropagator()
-	otel.SetTextMapPropagator(prop)
-
-	// Set up sdkTracer provider.
-	tracerProvider, err := newTraceProvider()
-	if err != nil {
-		handleErr(err)
-		return telemetry, shutdown, nil
-	}
-	shutdownFuncs = append(shutdownFuncs, tracerProvider.Shutdown)
-	// otel.SetTracerProvider(tracerProvider)
-
-	// Set up meter provider.
-	meterProvider, err := newMeterProvider()
-	if err != nil {
-		handleErr(err)
-		return telemetry, shutdown, nil
-	}
-	shutdownFuncs = append(shutdownFuncs, meterProvider.Shutdown)
-	// otel.SetMeterProvider(meterProvider)
-
-	// Set up logger provider.
-	loggerProvider, err := newLoggerProvider()
-	if err != nil {
-		handleErr(err)
-		return telemetry, shutdown, nil
-	}
-	shutdownFuncs = append(shutdownFuncs, loggerProvider.Shutdown)
-	// global.SetLoggerProvider(loggerProvider)
-
-	telemetry.Meter = otel.Meter(appName)
-	telemetry.Tracer = tracerProvider.Tracer(appName)
-	telemetry.Logger = otelslog.NewLogger(
-		appName,
-		otelslog.WithLoggerProvider(loggerProvider),
-	)
-
-	return telemetry, shutdown, nil
-}
-
-func newPropagator() propagation.TextMapPropagator {
-	return propagation.NewCompositeTextMapPropagator(
+	// propagator
+	propagator := propagation.NewCompositeTextMapPropagator(
 		propagation.TraceContext{},
 		propagation.Baggage{},
 	)
-}
+	telemeter.TextMapPropagator = propagator
 
-func newTraceProvider() (*sdkTracer.TracerProvider, error) {
-	traceExporter, err := stdouttrace.New(
-		stdouttrace.WithPrettyPrint())
-	if err != nil {
-		return nil, err
-	}
-
-	traceProvider := sdkTracer.NewTracerProvider(
-		sdkTracer.WithBatcher(traceExporter,
-			// Default is 5s. Set to 1s for demonstrative purposes.
-			sdkTracer.WithBatchTimeout(time.Second)),
+	// tracer
+	traceExporter, err := otlptracegrpc.New(
+		ctx,
+		otlptracegrpc.WithEndpointURL("http://localhost:4317"),
 	)
-
-	return traceProvider, nil
-}
-
-func newMeterProvider() (*sdkMetric.MeterProvider, error) {
-	metricExporter, err := stdoutmetric.New()
 	if err != nil {
-		return nil, err
+		handleErr(fmt.Errorf("[in telemetry.NewTelemeter] jaeger.New: %w", err))
+		return Telemeter{}, shutdown, err
 	}
-
-	meterProvider := sdkMetric.NewMeterProvider(
-		sdkMetric.WithReader(sdkMetric.NewPeriodicReader(metricExporter,
-			// Default is 1m. Set to 3s for demonstrative purposes.
-			sdkMetric.WithInterval(3*time.Second))),
+	tracerProvider := sdktracer.NewTracerProvider(
+		sdktracer.WithBatcher(traceExporter),
+		sdktracer.WithResource(resource.NewWithAttributes(
+			semconv.SchemaURL,
+			semconv.ServiceNameKey.String(appName),
+		)),
 	)
+	shutdownFuncs = append(shutdownFuncs, tracerProvider.Shutdown)
+	telemeter.TracerProvider = tracerProvider
 
-	return meterProvider, nil
-}
-
-func newLoggerProvider() (*log.LoggerProvider, error) {
-	logExporter, err := stdoutlog.New()
+	// meter
+	metricExporter, err := otlpmetricgrpc.New(
+		ctx,
+		otlpmetricgrpc.WithEndpoint("localhost:4317"),
+	)
 	if err != nil {
-		return nil, err
+		handleErr(fmt.Errorf("[in telemetry.NewTelemeter] jaeger.New: %w", err))
+		return Telemeter{}, shutdown, nil
 	}
-
-	loggerProvider := log.NewLoggerProvider(
-		log.WithProcessor(log.NewBatchProcessor(logExporter)),
+	meterProvider := sdkmetric.NewMeterProvider(
+		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExporter)),
+		sdkmetric.WithResource(resource.NewWithAttributes(
+			semconv.SchemaURL,
+			semconv.ServiceNameKey.String(appName),
+		)),
 	)
+	telemeter.MeterProvider = meterProvider
 
-	return loggerProvider, nil
+	return telemeter, shutdown, nil
 }

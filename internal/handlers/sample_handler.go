@@ -5,20 +5,23 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/jha-captech/golambdaotel/internal/telemetry"
-
 	"github.com/aws/aws-lambda-go/events"
+	"github.com/jha-captech/golambdaotel/internal/services"
+	"github.com/jha-captech/golambdaotel/internal/telemetry"
+	"go.opentelemetry.io/otel/attribute"
 )
 
-func HandlerSample(logger *slog.Logger, telemeter *telemetry.Telemeter) HandlerFunc {
+func HandlerSample(logger *slog.Logger, telemeter telemetry.Telemeter, service services.Service) HandlerFunc {
 	return func(ctx context.Context, request events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
-		logger.Info("running HandlerSample")
-		ctx, span := telemeter.Tracer.Start(ctx, "HandlerSample")
+		logger.InfoContext(ctx, "running HandlerSample")
+		ctx, span := telemeter.Tracer("handlers").Start(ctx, "HandlerSample")
 		defer span.End()
 
-		// ctx, span := tracer.Start(ctx, "HandlerSample")
+		logger.InfoContext(ctx, "In HandlerSample")
 
-		logger.Info("In HandlerSample")
+		span.SetAttributes(attribute.String("stringAttr", "hi!"))
+
+		service.DoStuff(ctx)
 
 		return returnJSON(http.StatusOK, map[string]any{
 			"message": "Hello World!",
