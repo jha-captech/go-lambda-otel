@@ -4,21 +4,23 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 
+	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktracer "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type Telemeter struct {
-	Logger *slog.Logger
-	*sdkmetric.MeterProvider
-	*sdktracer.TracerProvider
+	metric.MeterProvider
+	trace.TracerProvider
+	otellambda.Flusher
 	propagation.TextMapPropagator
 }
 
@@ -26,7 +28,6 @@ func NewTelemeter(ctx context.Context, appName string) (Telemeter, func(context.
 	var (
 		telemeter     Telemeter
 		shutdownFuncs []func(context.Context) error
-		err           error
 	)
 
 	shutdown := func(ctx context.Context) error {
@@ -37,10 +38,6 @@ func NewTelemeter(ctx context.Context, appName string) (Telemeter, func(context.
 		shutdownFuncs = nil
 
 		return err
-	}
-
-	handleErr := func(inErr error) {
-		err = errors.Join(inErr, shutdown(ctx))
 	}
 
 	// propagator
@@ -56,8 +53,7 @@ func NewTelemeter(ctx context.Context, appName string) (Telemeter, func(context.
 		otlptracegrpc.WithEndpointURL("http://localhost:4317"),
 	)
 	if err != nil {
-		handleErr(fmt.Errorf("[in telemetry.NewTelemeter] jaeger.New: %w", err))
-		return Telemeter{}, shutdown, err
+		return Telemeter{}, shutdown, fmt.Errorf("[in telemetry.NewTelemeter] jaeger.New: %w", err)
 	}
 	tracerProvider := sdktracer.NewTracerProvider(
 		sdktracer.WithBatcher(traceExporter),
@@ -75,8 +71,7 @@ func NewTelemeter(ctx context.Context, appName string) (Telemeter, func(context.
 		otlpmetricgrpc.WithEndpoint("localhost:4317"),
 	)
 	if err != nil {
-		handleErr(fmt.Errorf("[in telemetry.NewTelemeter] jaeger.New: %w", err))
-		return Telemeter{}, shutdown, nil
+		return Telemeter{}, shutdown, fmt.Errorf("[in telemetry.NewTelemeter] jaeger.New: %w", err)
 	}
 	meterProvider := sdkmetric.NewMeterProvider(
 		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExporter)),

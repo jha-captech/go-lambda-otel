@@ -48,7 +48,7 @@ func run(ctx context.Context) error {
 		handler,
 		otellambda.WithTracerProvider(telemeter.TracerProvider),
 		otellambda.WithPropagator(telemeter.TextMapPropagator),
-		otellambda.WithFlusher(telemeter.TracerProvider),
+		otellambda.WithFlusher(telemeter.Flusher),
 	)
 
 	lambda.StartWithOptions(
